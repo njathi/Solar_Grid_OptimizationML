@@ -59,14 +59,50 @@ def process_load_data(load_input_method, load_file=None, manual_text=None):
             if file_extension == 'csv':
                 load_df = pd.read_csv(load_file)
             elif file_extension == 'txt':
-                # Try different delimiters for text files
+                # Enhanced text file processing with multiple format support
                 try:
+                    # First try: standard CSV format
                     load_df = pd.read_csv(load_file, delimiter=',')
                 except:
                     try:
+                        # Second try: tab-separated
                         load_df = pd.read_csv(load_file, delimiter='\t')
                     except:
-                        load_df = pd.read_csv(load_file, delimiter=';')
+                        try:
+                            # Third try: semicolon-separated
+                            load_df = pd.read_csv(load_file, delimiter=';')
+                        except:
+                            # Fourth try: space-separated with custom parsing
+                            content = load_file.read().decode('utf-8')
+                            lines = content.strip().split('\n')
+                            data = []
+                            
+                            for line in lines:
+                                line = line.strip()
+                                # Skip empty lines and comments
+                                if not line or line.startswith('#'):
+                                    continue
+                                
+                                # Try to parse space-separated values
+                                parts = line.split()
+                                if len(parts) >= 2:
+                                    try:
+                                        # Try to parse datetime and load value
+                                        # Assume last part is load value, rest is datetime
+                                        datetime_str = ' '.join(parts[:-1])
+                                        load_value = float(parts[-1])
+                                        data.append([datetime_str, load_value])
+                                    except ValueError:
+                                        continue
+                            
+                            if data:
+                                load_df = pd.DataFrame(data, columns=['datetime', 'load'])
+                            else:
+                                st.error("Could not parse text file. Please check the format.")
+                                return None
+                            
+                            # Reset file pointer for potential future reads
+                            load_file.seek(0)
             elif file_extension == 'xlsx':
                 load_df = pd.read_excel(load_file)
             elif file_extension == 'json':
