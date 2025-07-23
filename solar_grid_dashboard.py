@@ -46,6 +46,23 @@ with col2:
         ["File Upload", "Manual Text Input", "Use Synthetic Load"]
     )
 
+# --- Solar Plant Data uploader ---
+st.subheader("Solar Plant Data (Optional)")
+solarplant_file = st.file_uploader("Upload solarplant_data.csv", type=["csv"])
+solarplant_df = None
+hourly_plant = None
+if solarplant_file is not None:
+    solarplant_df = pd.read_csv(solarplant_file)
+    solarplant_df['datetime'] = pd.to_datetime(solarplant_df['Updated Time'], dayfirst=True)
+    solarplant_df.set_index('datetime', inplace=True)
+    # Convert W to kW
+    solarplant_df['solar_generation_kw'] = solarplant_df['Production Power(W)'] / 1000.0
+    solarplant_df['load_kw'] = solarplant_df['Consumption Power(W)'] / 1000.0
+    # Resample to hourly mean
+    hourly_plant = solarplant_df.resample('H').mean()
+    st.write("Solar Plant Data Sample (Hourly):")
+    st.dataframe(hourly_plant[['solar_generation_kw', 'load_kw']].head())
+
 # Load profile processing function
 def process_load_data(load_input_method, load_file=None, manual_text=None):
     """Process load data from various input methods"""
@@ -211,204 +228,203 @@ if load_input_method == "Manual Text Input":
 else:
     manual_text = None
 
-if tmy_file:
-    df = pd.read_csv(tmy_file, skiprows=17)
-    st.subheader("Raw Weather Data Sample")
-    st.dataframe(df.head())
-    # Data cleaning
-    if 'time(UTC)' in df.columns:
-        df['time(UTC)'] = pd.to_datetime(df['time(UTC)'], format='%Y%m%d:%H%M', errors='coerce')
-    df['T2m'] = pd.to_numeric(df['T2m'], errors='coerce')
-    clean_df = df.dropna()
-    clean_df.set_index('time(UTC)', inplace=True)
-    st.subheader("Cleaned Weather Data Sample")
-    st.dataframe(clean_df.head())
+# --- Main logic: Use solar plant data if provided, else use TMY/forecast ---
+if solarplant_df is not None and hourly_plant is not None:
+    st.success("Using real solar plant data for both solar generation and load profile.")
+    solar_available = hourly_plant['solar_generation_kw'].values
+    load_profile = hourly_plant['load_kw'].values
+    hours = len(solar_available)
+    time_index = hourly_plant.index
+    rmse = np.nan  # Not applicable
+else:
+    if tmy_file:
+        df = pd.read_csv(tmy_file, skiprows=17)
+        st.subheader("Raw Weather Data Sample")
+        st.dataframe(df.head())
+        # Data cleaning
+        if 'time(UTC)' in df.columns:
+            df['time(UTC)'] = pd.to_datetime(df['time(UTC)'], format='%Y%m%d:%H%M', errors='coerce')
+        df['T2m'] = pd.to_numeric(df['T2m'], errors='coerce')
+        clean_df = df.dropna()
+        clean_df.set_index('time(UTC)', inplace=True)
+        st.subheader("Cleaned Weather Data Sample")
+        st.dataframe(clean_df.head())
 
-    # --- Load Profile Processing ---
-    st.subheader("Load Profile")
-    load_profile = process_load_data(load_input_method, load_file, manual_text)
+        # --- Load Profile Processing ---
+        st.subheader("Load Profile")
+        load_profile = process_load_data(load_input_method, load_file, manual_text)
 
-    # --- Forecasting ---
-    st.subheader("Solar Generation Forecasting (Random Forest)")
-    feature_cols = ['T2m', 'RH', 'Gb(n)', 'Gd(h)', 'IR(h)', 'WS10m', 'WD10m', 'SP']
-    if all(col in clean_df.columns for col in feature_cols):
-        X = clean_df[feature_cols]
-        y = clean_df['G(h)']
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
-        model = RandomForestRegressor(n_estimators=100, random_state=42)
-        model.fit(X_train, y_train)
-        y_pred = model.predict(X_test)
-        rmse = np.sqrt(mean_squared_error(y_test, y_pred))
-        st.write(f"Random Forest RMSE on test set: {rmse:.2f}")
-        
-        if matplotlib_available:
-            fig1, ax1 = plt.subplots(figsize=(10,3))
-            ax1.plot(y_test.index, y_test.values, label='Actual', alpha=0.7)
-            ax1.plot(y_test.index, y_pred, label='Predicted', alpha=0.7)
-            ax1.set_title('Actual vs Predicted G(h) (Test Set)')
-            ax1.set_xlabel('Time (UTC)')
-            ax1.set_ylabel('G(h)')
-            ax1.legend()
-            st.pyplot(fig1)
-        else:
-            # Use Streamlit's built-in charting
-            forecast_df = pd.DataFrame({
-                'Actual': y_test.values,
-                'Predicted': y_pred
-            }, index=y_test.index)
-            st.line_chart(forecast_df)
-        
-        # Feature importances
-        importances = model.feature_importances_
-        importance_df = pd.DataFrame({'Feature': feature_cols, 'Importance': importances}).sort_values(by='Importance', ascending=False)
-        st.write("Feature Importances:")
-        st.dataframe(importance_df)
-        
-        if matplotlib_available:
-            fig2, ax2 = plt.subplots(figsize=(6,4))
-            ax2.barh(importance_df['Feature'], importance_df['Importance'])
-            ax2.set_xlabel('Importance')
-            ax2.set_title('Random Forest Feature Importances')
-            ax2.invert_yaxis()
-            st.pyplot(fig2)
-        else:
-            st.bar_chart(importance_df.set_index('Feature'))
-
-        # --- Optimization ---
-        st.subheader("Load Distribution Optimization (with Battery)")
-        hours = len(y_test)
-        solar_available = y_pred
-        
-        # Load profile handling
-        if load_profile is not None:
-            if len(load_profile) >= hours:
-                load_profile = load_profile[:hours]
-                st.success(f"Using real load profile with {len(load_profile)} data points")
+        # --- Forecasting ---
+        st.subheader("Solar Generation Forecasting (Random Forest)")
+        feature_cols = ['T2m', 'RH', 'Gb(n)', 'Gd(h)', 'IR(h)', 'WS10m', 'WD10m', 'SP']
+        if all(col in clean_df.columns for col in feature_cols):
+            X = clean_df[feature_cols]
+            y = clean_df['G(h)']
+            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
+            model = RandomForestRegressor(n_estimators=100, random_state=42)
+            model.fit(X_train, y_train)
+            y_pred = model.predict(X_test)
+            rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+            st.write(f"Random Forest RMSE on test set: {rmse:.2f}")
+            if matplotlib_available:
+                fig1, ax1 = plt.subplots(figsize=(10,3))
+                ax1.plot(y_test.index, y_test.values, label='Actual', alpha=0.7)
+                ax1.plot(y_test.index, y_pred, label='Predicted', alpha=0.7)
+                ax1.set_title('Actual vs Predicted G(h) (Test Set)')
+                ax1.set_xlabel('Time (UTC)')
+                ax1.set_ylabel('G(h)')
+                ax1.legend()
+                st.pyplot(fig1)
             else:
-                st.warning(f"Load profile has only {len(load_profile)} points, but need {hours}. Using synthetic load.")
-                load_profile = None
-        
-        if load_profile is None:
-            # Synthetic load profile
-            t = np.arange(hours)
-            load_profile = 50 + 30 * np.sin(2 * np.pi * (t % 24) / 24) + np.random.normal(0, 5, size=hours)
-            load_profile = np.clip(load_profile, 0, None)
-            st.info("Using synthetic load profile")
-        
-        # Display load and solar
-        load_solar_df = pd.DataFrame({
-            'Load': load_profile, 
-            'Solar Available': solar_available
-        }, index=y_test.index)
-        st.line_chart(load_solar_df)
-        
-        # Battery simulation
-        battery_soc = 0.0
-        solar_used = np.zeros(hours)
-        battery_used = np.zeros(hours)
-        grid_import = np.zeros(hours)
-        excess_solar = np.zeros(hours)
-        soc_history = []
-        
-        for i in range(hours):
-            load = load_profile[i]
-            solar = solar_available[i]
-            used_from_solar = min(solar, load)
-            remaining_load = load - used_from_solar
-            excess = max(solar - used_from_solar, 0)
-            charge_possible = min(battery_charge_limit, battery_capacity - battery_soc)
-            charge = min(excess, charge_possible)
-            battery_soc += charge * battery_efficiency
-            discharge_possible = min(battery_discharge_limit, battery_soc)
-            discharge = min(remaining_load, discharge_possible)
-            battery_soc -= discharge / battery_efficiency
-            unmet = remaining_load - discharge
-            grid = max(unmet, 0)
-            solar_used[i] = used_from_solar
-            battery_used[i] = discharge
-            grid_import[i] = grid
-            excess_solar[i] = excess - charge
-            soc_history.append(battery_soc)
-        
-        # Plot results
-        if matplotlib_available:
-            fig3, ax3 = plt.subplots(figsize=(12,5))
-            ax3.plot(y_test.index, load_profile, label='Load', color='black', alpha=0.7)
-            ax3.plot(y_test.index, solar_available, label='Solar Available', color='gold', alpha=0.7)
-            ax3.fill_between(y_test.index, 0, solar_used, label='Solar Used', color='green', alpha=0.3)
-            ax3.fill_between(y_test.index, solar_used, solar_used + battery_used, label='Battery Used', color='orange', alpha=0.3)
-            ax3.fill_between(y_test.index, solar_used + battery_used, load_profile, label='Grid Import', color='red', alpha=0.2)
-            ax3.fill_between(y_test.index, load_profile, solar_available, where=solar_available>load_profile, label='Excess Solar', color='blue', alpha=0.2)
-            ax3.set_title('Load Distribution Optimization (Battery)')
-            ax3.set_xlabel('Time (UTC)')
-            ax3.set_ylabel('Energy (arbitrary units)')
-            ax3.legend(loc='upper right')
-            st.pyplot(fig3)
-            
-            # Battery SOC plot
-            fig4, ax4 = plt.subplots(figsize=(10,2))
-            ax4.plot(y_test.index, soc_history, label='Battery SOC')
-            ax4.set_title('Battery State of Charge Over Time')
-            ax4.set_xlabel('Time (UTC)')
-            ax4.set_ylabel('SOC')
-            st.pyplot(fig4)
+                forecast_df = pd.DataFrame({
+                    'Actual': y_test.values,
+                    'Predicted': y_pred
+                }, index=y_test.index)
+                st.line_chart(forecast_df)
+            importances = model.feature_importances_
+            importance_df = pd.DataFrame({'Feature': feature_cols, 'Importance': importances}).sort_values(by='Importance', ascending=False)
+            st.write("Feature Importances:")
+            st.dataframe(importance_df)
+            if matplotlib_available:
+                fig2, ax2 = plt.subplots(figsize=(6,4))
+                ax2.barh(importance_df['Feature'], importance_df['Importance'])
+                ax2.set_xlabel('Importance')
+                ax2.set_title('Random Forest Feature Importances')
+                ax2.invert_yaxis()
+                st.pyplot(fig2)
+            else:
+                st.bar_chart(importance_df.set_index('Feature'))
+            # --- Optimization ---
+            st.subheader("Load Distribution Optimization (with Battery)")
+            hours = len(y_test)
+            solar_available = y_pred
+            if load_profile is not None:
+                if len(load_profile) >= hours:
+                    load_profile = load_profile[:hours]
+                    st.success(f"Using real load profile with {len(load_profile)} data points")
+                else:
+                    st.warning(f"Load profile has only {len(load_profile)} points, but need {hours}. Using synthetic load.")
+                    load_profile = None
+            if load_profile is None:
+                t = np.arange(hours)
+                load_profile = 50 + 30 * np.sin(2 * np.pi * (t % 24) / 24) + np.random.normal(0, 5, size=hours)
+                load_profile = np.clip(load_profile, 0, None)
+                st.info("Using synthetic load profile")
+            time_index = y_test.index
         else:
-            # Use Streamlit charts for optimization results
-            optimization_df = pd.DataFrame({
-                'Load': load_profile,
-                'Solar Available': solar_available,
-                'Solar Used': solar_used,
-                'Battery Used': battery_used,
-                'Grid Import': grid_import
-            }, index=y_test.index)
-            st.line_chart(optimization_df)
-            
-            # Battery SOC
-            soc_df = pd.DataFrame({'Battery SOC': soc_history}, index=y_test.index)
-            st.line_chart(soc_df)
-        
-        # --- Results Summary and Download ---
-        st.subheader("Results Summary")
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Total Load", f"{np.sum(load_profile):.2f}")
-            st.metric("Total Solar Used", f"{np.sum(solar_used):.2f}")
-        with col2:
-            st.metric("Total Battery Used", f"{np.sum(battery_used):.2f}")
-            st.metric("Total Grid Import", f"{np.sum(grid_import):.2f}")
-        with col3:
-            st.metric("Total Excess Solar", f"{np.sum(excess_solar):.2f}")
-            st.metric("Final Battery SOC", f"{soc_history[-1]:.2f}")
-        
-        # Create results DataFrame for download
-        results_df = pd.DataFrame({
-            'datetime': y_test.index,
-            'load': load_profile,
-            'solar_available': solar_available,
-            'solar_used': solar_used,
-            'battery_used': battery_used,
-            'grid_import': grid_import,
-            'excess_solar': excess_solar,
-            'battery_soc': soc_history
-        })
-        
-        # Download buttons
-        st.subheader("Download Results")
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            # Download CSV
-            csv = results_df.to_csv(index=False)
-            st.download_button(
-                label="Download Results as CSV",
-                data=csv,
-                file_name="solar_grid_optimization_results.csv",
-                mime="text/csv"
-            )
-        
-        with col2:
-            # Download summary report
-            summary_text = f"""
+            st.warning("Not all required feature columns are present in the uploaded data.")
+            solar_available = None
+            time_index = None
+            rmse = np.nan
+    else:
+        st.info("Please upload a TMY.csv file to begin.")
+        solar_available = None
+        load_profile = None
+        time_index = None
+        rmse = np.nan
+
+# --- Optimization and Visualization (shared for both data sources) ---
+if solar_available is not None and load_profile is not None and time_index is not None:
+    st.subheader("Load and Solar Data (Used for Optimization)")
+    load_solar_df = pd.DataFrame({
+        'Load': load_profile,
+        'Solar Available': solar_available
+    }, index=time_index)
+    st.line_chart(load_solar_df)
+    # Battery simulation
+    battery_soc = 0.0
+    solar_used = np.zeros(len(load_profile))
+    battery_used = np.zeros(len(load_profile))
+    grid_import = np.zeros(len(load_profile))
+    excess_solar = np.zeros(len(load_profile))
+    soc_history = []
+    for i in range(len(load_profile)):
+        load = load_profile[i]
+        solar = solar_available[i]
+        used_from_solar = min(solar, load)
+        remaining_load = load - used_from_solar
+        excess = max(solar - used_from_solar, 0)
+        charge_possible = min(battery_charge_limit, battery_capacity - battery_soc)
+        charge = min(excess, charge_possible)
+        battery_soc += charge * battery_efficiency
+        discharge_possible = min(battery_discharge_limit, battery_soc)
+        discharge = min(remaining_load, discharge_possible)
+        battery_soc -= discharge / battery_efficiency
+        unmet = remaining_load - discharge
+        grid = max(unmet, 0)
+        solar_used[i] = used_from_solar
+        battery_used[i] = discharge
+        grid_import[i] = grid
+        excess_solar[i] = excess - charge
+        soc_history.append(battery_soc)
+    # Plot results
+    if matplotlib_available:
+        fig3, ax3 = plt.subplots(figsize=(12,5))
+        ax3.plot(time_index, load_profile, label='Load', color='black', alpha=0.7)
+        ax3.plot(time_index, solar_available, label='Solar Available', color='gold', alpha=0.7)
+        ax3.fill_between(time_index, 0, solar_used, label='Solar Used', color='green', alpha=0.3)
+        ax3.fill_between(time_index, solar_used, solar_used + battery_used, label='Battery Used', color='orange', alpha=0.3)
+        ax3.fill_between(time_index, solar_used + battery_used, load_profile, label='Grid Import', color='red', alpha=0.2)
+        ax3.fill_between(time_index, load_profile, solar_available, where=solar_available>load_profile, label='Excess Solar', color='blue', alpha=0.2)
+        ax3.set_title('Load Distribution Optimization (Battery)')
+        ax3.set_xlabel('Time (UTC)')
+        ax3.set_ylabel('Energy (kW)')
+        ax3.legend(loc='upper right')
+        st.pyplot(fig3)
+        # Battery SOC plot
+        fig4, ax4 = plt.subplots(figsize=(10,2))
+        ax4.plot(time_index, soc_history, label='Battery SOC')
+        ax4.set_title('Battery State of Charge Over Time')
+        ax4.set_xlabel('Time (UTC)')
+        ax4.set_ylabel('SOC')
+        st.pyplot(fig4)
+    else:
+        optimization_df = pd.DataFrame({
+            'Load': load_profile,
+            'Solar Available': solar_available,
+            'Solar Used': solar_used,
+            'Battery Used': battery_used,
+            'Grid Import': grid_import
+        }, index=time_index)
+        st.line_chart(optimization_df)
+        soc_df = pd.DataFrame({'Battery SOC': soc_history}, index=time_index)
+        st.line_chart(soc_df)
+    # --- Results Summary and Download ---
+    st.subheader("Results Summary")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Total Load", f"{np.sum(load_profile):.2f}")
+        st.metric("Total Solar Used", f"{np.sum(solar_used):.2f}")
+    with col2:
+        st.metric("Total Battery Used", f"{np.sum(battery_used):.2f}")
+        st.metric("Total Grid Import", f"{np.sum(grid_import):.2f}")
+    with col3:
+        st.metric("Total Excess Solar", f"{np.sum(excess_solar):.2f}")
+        st.metric("Final Battery SOC", f"{soc_history[-1]:.2f}")
+    # Create results DataFrame for download
+    results_df = pd.DataFrame({
+        'datetime': time_index,
+        'load': load_profile,
+        'solar_available': solar_available,
+        'solar_used': solar_used,
+        'battery_used': battery_used,
+        'grid_import': grid_import,
+        'excess_solar': excess_solar,
+        'battery_soc': soc_history
+    })
+    # Download buttons
+    st.subheader("Download Results")
+    col1, col2 = st.columns(2)
+    with col1:
+        csv = results_df.to_csv(index=False)
+        st.download_button(
+            label="Download Results as CSV",
+            data=csv,
+            file_name="solar_grid_optimization_results.csv",
+            mime="text/csv"
+        )
+    with col2:
+        summary_text = f"""
 Solar Grid Optimization Results
 ==============================
 
@@ -427,22 +443,15 @@ Results:
 - Total Grid Import: {np.sum(grid_import):.2f}
 - Total Excess Solar: {np.sum(excess_solar):.2f}
 - Final Battery SOC: {soc_history[-1]:.2f}
-- Forecast RMSE: {rmse:.2f}
+- Forecast RMSE: {rmse if not np.isnan(rmse) else 'N/A'}
 
 Generated on: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}
 """
-            st.download_button(
-                label="Download Summary Report",
-                data=summary_text,
-                file_name="solar_grid_optimization_summary.txt",
-                mime="text/plain"
-            )
-        
-        # Display detailed results table
-        st.subheader("Detailed Results")
-        st.dataframe(results_df)
-        
-    else:
-        st.warning("Not all required feature columns are present in the uploaded data.")
-else:
-    st.info("Please upload a TMY.csv file to begin.") 
+        st.download_button(
+            label="Download Summary Report",
+            data=summary_text,
+            file_name="solar_grid_optimization_summary.txt",
+            mime="text/plain"
+        )
+    st.subheader("Detailed Results")
+    st.dataframe(results_df) 
