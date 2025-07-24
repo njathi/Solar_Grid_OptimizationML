@@ -15,6 +15,8 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error
 import io
 import json
+import plotly.express as px
+import plotly.graph_objects as go
 
 st.set_page_config(page_title="Solar Grid Optimization Dashboard", layout="wide")
 st.title("Solar Grid Optimization Dashboard")
@@ -25,20 +27,114 @@ You can adjust system parameters and visualize the results interactively.
 
 # --- Sidebar for user inputs ---
 st.sidebar.header("System Parameters")
-# Scenario selector
-st.sidebar.header("Scenario Analysis")
-scenario = st.sidebar.selectbox(
-    "Select Scenario",
-    ["Hybrid (Solar + Battery + Grid)", "Grid-only", "Solar-only"]
+
+# --- Custom Scenario Management ---
+if 'scenarios' not in st.session_state:
+    st.session_state['scenarios'] = {}
+if 'selected_scenario' not in st.session_state:
+    st.session_state['selected_scenario'] = None
+
+st.sidebar.header("Custom Scenarios")
+scenario_names = list(st.session_state['scenarios'].keys())
+selected_scenario = st.sidebar.selectbox(
+    "Load Saved Scenario",
+    ["<None>"] + scenario_names,
+    index=0 if st.session_state['selected_scenario'] is None else scenario_names.index(st.session_state['selected_scenario']) + 1
 )
-battery_capacity = st.sidebar.slider("Battery Capacity (kWh)", 100, 1000, 400, 50)
-battery_charge_limit = st.sidebar.slider("Battery Charge Limit (kWh/h)", 10, 100, 30, 5)
-battery_discharge_limit = st.sidebar.slider("Battery Discharge Limit (kWh/h)", 10, 100, 30, 5)
-battery_efficiency = st.sidebar.slider("Battery Efficiency", 0.7, 1.0, 0.9, 0.01)
-grid_price = st.sidebar.number_input("Grid Price (USD/kWh)", value=0.10, step=0.01)
-price_peak = st.sidebar.number_input("Peak Price (USD/kWh)", value=0.30, step=0.01)
-peak_start = st.sidebar.number_input("Peak Start Hour", value=18, min_value=0, max_value=23)
-peak_end = st.sidebar.number_input("Peak End Hour", value=22, min_value=0, max_value=23)
+if selected_scenario != "<None>":
+    if st.sidebar.button("Load Scenario"):
+        params = st.session_state['scenarios'][selected_scenario]
+        st.session_state['selected_scenario'] = selected_scenario
+        # Update parameter widgets
+        st.session_state['battery_capacity'] = params['battery_capacity']
+        st.session_state['battery_charge_limit'] = params['battery_charge_limit']
+        st.session_state['battery_discharge_limit'] = params['battery_discharge_limit']
+        st.session_state['battery_efficiency'] = params['battery_efficiency']
+        st.session_state['grid_price'] = params['grid_price']
+        st.session_state['price_peak'] = params['price_peak']
+        st.session_state['peak_start'] = params['peak_start']
+        st.session_state['peak_end'] = params['peak_end']
+    if st.sidebar.button("Delete Scenario"):
+        del st.session_state['scenarios'][selected_scenario]
+        st.session_state['selected_scenario'] = None
+        st.experimental_rerun()
+
+with st.sidebar.expander("Save Current Scenario"):
+    scenario_name = st.text_input("Scenario Name", key="scenario_name")
+    if st.button("Save Scenario"):
+        if scenario_name:
+            st.session_state['scenarios'][scenario_name] = {
+                'battery_capacity': st.session_state.get('battery_capacity', 400),
+                'battery_charge_limit': st.session_state.get('battery_charge_limit', 30),
+                'battery_discharge_limit': st.session_state.get('battery_discharge_limit', 30),
+                'battery_efficiency': st.session_state.get('battery_efficiency', 0.9),
+                'grid_price': st.session_state.get('grid_price', 0.10),
+                'price_peak': st.session_state.get('price_peak', 0.30),
+                'peak_start': st.session_state.get('peak_start', 18),
+                'peak_end': st.session_state.get('peak_end', 22)
+            }
+            st.session_state['selected_scenario'] = scenario_name
+            st.success(f"Scenario '{scenario_name}' saved!")
+        else:
+            st.warning("Please enter a scenario name.")
+
+# --- Reset to Defaults Button ---
+defaults = {
+    'battery_capacity': 400,
+    'battery_charge_limit': 30,
+    'battery_discharge_limit': 30,
+    'battery_efficiency': 0.9,
+    'grid_price': 0.10,
+    'price_peak': 0.30,
+    'price_offpeak': 0.10,
+    'peak_start': 18,
+    'peak_end': 22
+}
+if st.sidebar.button('Reset to defaults'):
+    for k, v in defaults.items():
+        st.session_state[k] = v
+    st.session_state['selected_scenario'] = None
+    st.experimental_rerun()
+
+# --- Parameter widgets (use session_state for dynamic updates) ---
+battery_capacity = st.sidebar.slider(
+    "Battery Capacity (kWh)", 100, 1000, st.session_state.get('battery_capacity', 400), 50, key='battery_capacity',
+    help="Total energy storage capacity of the battery in kilowatt-hours (kWh). Higher values mean more stored energy."
+)
+battery_charge_limit = st.sidebar.slider(
+    "Battery Charge Limit (kWh/h)", 10, 100, st.session_state.get('battery_charge_limit', 30), 5, key='battery_charge_limit',
+    help="Maximum rate at which the battery can be charged per hour (kWh/h)."
+)
+battery_discharge_limit = st.sidebar.slider(
+    "Battery Discharge Limit (kWh/h)", 10, 100, st.session_state.get('battery_discharge_limit', 30), 5, key='battery_discharge_limit',
+    help="Maximum rate at which the battery can be discharged per hour (kWh/h)."
+)
+battery_efficiency = st.sidebar.slider(
+    "Battery Efficiency", 0.7, 1.0, st.session_state.get('battery_efficiency', 0.9), 0.01, key='battery_efficiency',
+    help="Fraction of energy retained during charge/discharge cycles. 1.0 means no losses."
+)
+grid_price = st.sidebar.number_input(
+    "Grid Price (USD/kWh)", value=st.session_state.get('grid_price', 0.10), step=0.01, key='grid_price',
+    help="Standard price per kWh for grid electricity (used if TOU pricing is not enabled)."
+)
+# --- Time-of-Use (TOU) Pricing ---
+st.sidebar.header("Time-of-Use (TOU) Pricing")
+peak_price = st.sidebar.number_input(
+    "Peak Price (USD/kWh)", value=st.session_state.get('price_peak', 0.30), step=0.01, key='price_peak',
+    help="Grid electricity price per kWh during peak hours."
+)
+offpeak_price = st.sidebar.number_input(
+    "Off-Peak Price (USD/kWh)", value=st.session_state.get('price_offpeak', 0.10), step=0.01, key='price_offpeak',
+    help="Grid electricity price per kWh during off-peak hours."
+)
+peak_start = st.sidebar.number_input(
+    "Peak Start Hour", value=st.session_state.get('peak_start', 18), min_value=0, max_value=23, key='peak_start',
+    help="Hour of day (0-23) when peak pricing starts."
+)
+peak_end = st.sidebar.number_input(
+    "Peak End Hour", value=st.session_state.get('peak_end', 22), min_value=0, max_value=23, key='peak_end',
+    help="Hour of day (0-23) when peak pricing ends."
+)
 
 # --- File uploaders ---
 col1, col2 = st.columns(2)
@@ -330,6 +426,13 @@ else:
         time_index = None
         rmse = np.nan
 
+# --- Scenario Analysis Selection ---
+st.sidebar.header("Scenario Analysis")
+scenario = st.sidebar.selectbox(
+    "Select Scenario to View in Detail",
+    ["Hybrid (Solar + Battery + Grid)", "Grid-only", "Solar-only"]
+)
+
 # --- Scenario Analysis Logic ---
 # Constants for carbon emissions and tree equivalence
 CO2_PER_KWH_GRID = 0.7  # kg CO2 per kWh (adjust as needed for your grid)
@@ -337,6 +440,13 @@ CO2_ABSORBED_PER_TREE_PER_YEAR = 21  # kg CO2 per tree per year (conservative es
 
 scenario_results = {}
 scenarios_to_run = ["Hybrid (Solar + Battery + Grid)", "Grid-only", "Solar-only"]
+
+def get_tou_price(hour):
+    if peak_start <= peak_end:
+        return peak_price if peak_start <= hour < peak_end else offpeak_price
+    else:
+        # Peak period wraps around midnight
+        return peak_price if (hour >= peak_start or hour < peak_end) else offpeak_price
 
 for sc in scenarios_to_run:
     if solar_available is not None and load_profile is not None and time_index is not None:
@@ -382,6 +492,12 @@ for sc in scenarios_to_run:
                 excess_solar[i] = excess - charge
                 soc_history.append(battery_soc)
                 unmet_load[i] = unmet if unmet > 0 else 0
+        # TOU cost calculation
+        if time_index is not None:
+            tou_prices = np.array([get_tou_price(ts.hour) for ts in time_index])
+            tou_cost = np.sum(grid_import * tou_prices)
+        else:
+            tou_cost = np.sum(grid_import) * offpeak_price
         # Carbon emissions and tree equivalence
         total_grid_import = np.sum(grid_import)
         total_co2 = total_grid_import * CO2_PER_KWH_GRID
@@ -396,7 +512,7 @@ for sc in scenarios_to_run:
             'Unmet Load': np.sum(unmet_load),
             'CO2 Emissions (kg)': total_co2,
             'Trees Needed': trees_needed,
-            'Cost ($)': total_grid_import * grid_price if grid_price else 0,
+            'Cost ($)': tou_cost,
             'Time Index': time_index,
             'Load Profile': load_profile,
             'Solar Available': solar_available,
@@ -424,22 +540,38 @@ if scenario_results:
         }
         for sc in scenarios_to_run
     ])
+    # Plotly bar chart for scenario comparison
+    fig_comp = px.bar(
+        comp_df.melt(id_vars='Scenario', var_name='Metric', value_name='Value'),
+        x='Scenario', y='Value', color='Metric', barmode='group',
+        title='Scenario Comparison',
+        hover_data=['Metric', 'Value']
+    )
+    st.plotly_chart(fig_comp, use_container_width=True)
     st.dataframe(comp_df.set_index('Scenario'))
     # Visualize selected scenario
     st.subheader(f"Detailed Results: {scenario}")
     res = scenario_results[scenario]
     results_df = pd.DataFrame({
         'datetime': res['Time Index'],
-        'load': res['Load Profile'],
-        'solar_available': res['Solar Available'],
-        'solar_used': res['Solar Used Array'],
-        'battery_used': res['Battery Used Array'],
-        'grid_import': res['Grid Import Array'],
-        'excess_solar': res['Excess Solar Array'],
-        'battery_soc': res['SOC History'],
-        'unmet_load': res['Unmet Load Array']
+        'Load': res['Load Profile'],
+        'Solar Available': res['Solar Available'],
+        'Solar Used': res['Solar Used Array'],
+        'Battery Used': res['Battery Used Array'],
+        'Grid Import': res['Grid Import Array'],
+        'Excess Solar': res['Excess Solar Array'],
+        'Battery SOC': res['SOC History'],
+        'Unmet Load': res['Unmet Load Array']
     })
-    st.line_chart(results_df.set_index('datetime')[['load', 'solar_available', 'solar_used', 'battery_used', 'grid_import']])
+    # Plotly time-series chart
+    fig_ts = go.Figure()
+    for col in ['Load', 'Solar Available', 'Solar Used', 'Battery Used', 'Grid Import']:
+        fig_ts.add_trace(go.Scatter(x=results_df['datetime'], y=results_df[col], mode='lines', name=col))
+    fig_ts.update_layout(title='Energy Flows Over Time', xaxis_title='Time', yaxis_title='kW', hovermode='x unified')
+    st.plotly_chart(fig_ts, use_container_width=True)
+    # Battery SOC time-series
+    fig_soc = px.line(results_df, x='datetime', y='Battery SOC', title='Battery State of Charge Over Time')
+    st.plotly_chart(fig_soc, use_container_width=True)
     st.subheader("Summary Metrics")
     col1, col2, col3 = st.columns(3)
     with col1:
