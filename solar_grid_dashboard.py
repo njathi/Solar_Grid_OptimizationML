@@ -25,6 +25,12 @@ You can adjust system parameters and visualize the results interactively.
 
 # --- Sidebar for user inputs ---
 st.sidebar.header("System Parameters")
+# Scenario selector
+st.sidebar.header("Scenario Analysis")
+scenario = st.sidebar.selectbox(
+    "Select Scenario",
+    ["Hybrid (Solar + Battery + Grid)", "Grid-only", "Solar-only"]
+)
 battery_capacity = st.sidebar.slider("Battery Capacity (kWh)", 100, 1000, 400, 50)
 battery_charge_limit = st.sidebar.slider("Battery Charge Limit (kWh/h)", 10, 100, 30, 5)
 battery_discharge_limit = st.sidebar.slider("Battery Discharge Limit (kWh/h)", 10, 100, 30, 5)
@@ -324,110 +330,138 @@ else:
         time_index = None
         rmse = np.nan
 
-# --- Optimization and Visualization (shared for both data sources) ---
-if solar_available is not None and load_profile is not None and time_index is not None:
-    st.subheader("Load and Solar Data (Used for Optimization)")
-    load_solar_df = pd.DataFrame({
-        'Load': load_profile,
-        'Solar Available': solar_available
-    }, index=time_index)
-    st.line_chart(load_solar_df)
-    # Battery simulation
-    battery_soc = 0.0
-    solar_used = np.zeros(len(load_profile))
-    battery_used = np.zeros(len(load_profile))
-    grid_import = np.zeros(len(load_profile))
-    excess_solar = np.zeros(len(load_profile))
-    soc_history = []
-    for i in range(len(load_profile)):
-        load = load_profile[i]
-        solar = solar_available[i]
-        used_from_solar = min(solar, load)
-        remaining_load = load - used_from_solar
-        excess = max(solar - used_from_solar, 0)
-        charge_possible = min(battery_charge_limit, battery_capacity - battery_soc)
-        charge = min(excess, charge_possible)
-        battery_soc += charge * battery_efficiency
-        discharge_possible = min(battery_discharge_limit, battery_soc)
-        discharge = min(remaining_load, discharge_possible)
-        battery_soc -= discharge / battery_efficiency
-        unmet = remaining_load - discharge
-        grid = max(unmet, 0)
-        solar_used[i] = used_from_solar
-        battery_used[i] = discharge
-        grid_import[i] = grid
-        excess_solar[i] = excess - charge
-        soc_history.append(battery_soc)
-    # Plot results
-    if matplotlib_available:
-        fig3, ax3 = plt.subplots(figsize=(12,5))
-        ax3.plot(time_index, load_profile, label='Load', color='black', alpha=0.7)
-        ax3.plot(time_index, solar_available, label='Solar Available', color='gold', alpha=0.7)
-        ax3.fill_between(time_index, 0, solar_used, label='Solar Used', color='green', alpha=0.3)
-        ax3.fill_between(time_index, solar_used, solar_used + battery_used, label='Battery Used', color='orange', alpha=0.3)
-        ax3.fill_between(time_index, solar_used + battery_used, load_profile, label='Grid Import', color='red', alpha=0.2)
-        ax3.fill_between(time_index, load_profile, solar_available, where=solar_available>load_profile, label='Excess Solar', color='blue', alpha=0.2)
-        ax3.set_title('Load Distribution Optimization (Battery)')
-        ax3.set_xlabel('Time (UTC)')
-        ax3.set_ylabel('Energy (kW)')
-        ax3.legend(loc='upper right')
-        st.pyplot(fig3)
-        # Battery SOC plot
-        fig4, ax4 = plt.subplots(figsize=(10,2))
-        ax4.plot(time_index, soc_history, label='Battery SOC')
-        ax4.set_title('Battery State of Charge Over Time')
-        ax4.set_xlabel('Time (UTC)')
-        ax4.set_ylabel('SOC')
-        st.pyplot(fig4)
-    else:
-        optimization_df = pd.DataFrame({
-            'Load': load_profile,
+# --- Scenario Analysis Logic ---
+# Constants for carbon emissions and tree equivalence
+CO2_PER_KWH_GRID = 0.7  # kg CO2 per kWh (adjust as needed for your grid)
+CO2_ABSORBED_PER_TREE_PER_YEAR = 21  # kg CO2 per tree per year (conservative estimate)
+
+scenario_results = {}
+scenarios_to_run = ["Hybrid (Solar + Battery + Grid)", "Grid-only", "Solar-only"]
+
+for sc in scenarios_to_run:
+    if solar_available is not None and load_profile is not None and time_index is not None:
+        if sc == "Grid-only":
+            solar_used = np.zeros_like(load_profile)
+            battery_used = np.zeros_like(load_profile)
+            grid_import = load_profile.copy()
+            excess_solar = np.zeros_like(load_profile)
+            soc_history = [0] * len(load_profile)
+            unmet_load = np.zeros_like(load_profile)
+        elif sc == "Solar-only":
+            solar_used = np.minimum(solar_available, load_profile)
+            battery_used = np.zeros_like(load_profile)
+            grid_import = np.zeros_like(load_profile)
+            excess_solar = np.maximum(solar_available - load_profile, 0)
+            soc_history = [0] * len(load_profile)
+            unmet_load = np.maximum(load_profile - solar_available, 0)
+        elif sc == "Hybrid (Solar + Battery + Grid)":
+            battery_soc = 0.0
+            solar_used = np.zeros(len(load_profile))
+            battery_used = np.zeros(len(load_profile))
+            grid_import = np.zeros(len(load_profile))
+            excess_solar = np.zeros(len(load_profile))
+            soc_history = []
+            unmet_load = np.zeros(len(load_profile))
+            for i in range(len(load_profile)):
+                load = load_profile[i]
+                solar = solar_available[i]
+                used_from_solar = min(solar, load)
+                remaining_load = load - used_from_solar
+                excess = max(solar - used_from_solar, 0)
+                charge_possible = min(battery_charge_limit, battery_capacity - battery_soc)
+                charge = min(excess, charge_possible)
+                battery_soc += charge * battery_efficiency
+                discharge_possible = min(battery_discharge_limit, battery_soc)
+                discharge = min(remaining_load, discharge_possible)
+                battery_soc -= discharge / battery_efficiency
+                unmet = remaining_load - discharge
+                grid = max(unmet, 0)
+                solar_used[i] = used_from_solar
+                battery_used[i] = discharge
+                grid_import[i] = grid
+                excess_solar[i] = excess - charge
+                soc_history.append(battery_soc)
+                unmet_load[i] = unmet if unmet > 0 else 0
+        # Carbon emissions and tree equivalence
+        total_grid_import = np.sum(grid_import)
+        total_co2 = total_grid_import * CO2_PER_KWH_GRID
+        trees_needed = total_co2 / CO2_ABSORBED_PER_TREE_PER_YEAR
+        scenario_results[sc] = {
+            'Load': np.sum(load_profile),
+            'Solar Used': np.sum(solar_used),
+            'Battery Used': np.sum(battery_used),
+            'Grid Import': total_grid_import,
+            'Excess Solar': np.sum(excess_solar),
+            'Final Battery SOC': soc_history[-1] if soc_history else 0,
+            'Unmet Load': np.sum(unmet_load),
+            'CO2 Emissions (kg)': total_co2,
+            'Trees Needed': trees_needed,
+            'Cost ($)': total_grid_import * grid_price if grid_price else 0,
+            'Time Index': time_index,
+            'Load Profile': load_profile,
             'Solar Available': solar_available,
-            'Solar Used': solar_used,
-            'Battery Used': battery_used,
-            'Grid Import': grid_import
-        }, index=time_index)
-        st.line_chart(optimization_df)
-        soc_df = pd.DataFrame({'Battery SOC': soc_history}, index=time_index)
-        st.line_chart(soc_df)
-    # --- Results Summary and Download ---
-    st.subheader("Results Summary")
+            'Solar Used Array': solar_used,
+            'Battery Used Array': battery_used,
+            'Grid Import Array': grid_import,
+            'Excess Solar Array': excess_solar,
+            'SOC History': soc_history,
+            'Unmet Load Array': unmet_load
+        }
+
+# --- Visualization and Comparison Table ---
+if scenario_results:
+    st.subheader("Scenario Comparison Table")
+    comp_df = pd.DataFrame([
+        {
+            'Scenario': sc,
+            'Grid Import (kWh)': scenario_results[sc]['Grid Import'],
+            'Solar Used (kWh)': scenario_results[sc]['Solar Used'],
+            'Battery Used (kWh)': scenario_results[sc]['Battery Used'],
+            'Unmet Load (kWh)': scenario_results[sc]['Unmet Load'],
+            'CO2 Emissions (kg)': scenario_results[sc]['CO2 Emissions (kg)'],
+            'Trees Needed': scenario_results[sc]['Trees Needed'],
+            'Cost ($)': scenario_results[sc]['Cost ($)']
+        }
+        for sc in scenarios_to_run
+    ])
+    st.dataframe(comp_df.set_index('Scenario'))
+    # Visualize selected scenario
+    st.subheader(f"Detailed Results: {scenario}")
+    res = scenario_results[scenario]
+    results_df = pd.DataFrame({
+        'datetime': res['Time Index'],
+        'load': res['Load Profile'],
+        'solar_available': res['Solar Available'],
+        'solar_used': res['Solar Used Array'],
+        'battery_used': res['Battery Used Array'],
+        'grid_import': res['Grid Import Array'],
+        'excess_solar': res['Excess Solar Array'],
+        'battery_soc': res['SOC History'],
+        'unmet_load': res['Unmet Load Array']
+    })
+    st.line_chart(results_df.set_index('datetime')[['load', 'solar_available', 'solar_used', 'battery_used', 'grid_import']])
+    st.subheader("Summary Metrics")
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric("Total Load", f"{np.sum(load_profile):.2f}")
-        st.metric("Total Solar Used", f"{np.sum(solar_used):.2f}")
+        st.metric("Total Load", f"{res['Load']:.2f}")
+        st.metric("Total Solar Used", f"{res['Solar Used']:.2f}")
     with col2:
-        st.metric("Total Battery Used", f"{np.sum(battery_used):.2f}")
-        st.metric("Total Grid Import", f"{np.sum(grid_import):.2f}")
+        st.metric("Total Battery Used", f"{res['Battery Used']:.2f}")
+        st.metric("Total Grid Import", f"{res['Grid Import']:.2f}")
     with col3:
-        st.metric("Total Excess Solar", f"{np.sum(excess_solar):.2f}")
-        st.metric("Final Battery SOC", f"{soc_history[-1]:.2f}")
-    # Create results DataFrame for download
-    results_df = pd.DataFrame({
-        'datetime': time_index,
-        'load': load_profile,
-        'solar_available': solar_available,
-        'solar_used': solar_used,
-        'battery_used': battery_used,
-        'grid_import': grid_import,
-        'excess_solar': excess_solar,
-        'battery_soc': soc_history
-    })
-    # Download buttons
+        st.metric("CO2 Emissions (kg)", f"{res['CO2 Emissions (kg)']:.2f}")
+        st.metric("Trees Needed", f"{res['Trees Needed']:.2f}")
     st.subheader("Download Results")
-    col1, col2 = st.columns(2)
-    with col1:
-        csv = results_df.to_csv(index=False)
-        st.download_button(
-            label="Download Results as CSV",
-            data=csv,
-            file_name="solar_grid_optimization_results.csv",
-            mime="text/csv"
-        )
-    with col2:
-        summary_text = f"""
-Solar Grid Optimization Results
-==============================
+    csv = results_df.to_csv(index=False)
+    st.download_button(
+        label="Download Results as CSV",
+        data=csv,
+        file_name=f"solar_grid_optimization_results_{scenario.replace(' ', '_').lower()}.csv",
+        mime="text/csv"
+    )
+    summary_text = f"""
+Solar Grid Optimization Results ({scenario})
+===========================================
 
 System Parameters:
 - Battery Capacity: {battery_capacity} kWh
@@ -438,21 +472,22 @@ System Parameters:
 - Peak Price: ${price_peak}/kWh
 
 Results:
-- Total Load: {np.sum(load_profile):.2f}
-- Total Solar Used: {np.sum(solar_used):.2f}
-- Total Battery Used: {np.sum(battery_used):.2f}
-- Total Grid Import: {np.sum(grid_import):.2f}
-- Total Excess Solar: {np.sum(excess_solar):.2f}
-- Final Battery SOC: {soc_history[-1]:.2f}
-- Forecast RMSE: {rmse if not np.isnan(rmse) else 'N/A'}
+- Total Load: {res['Load']:.2f}
+- Total Solar Used: {res['Solar Used']:.2f}
+- Total Battery Used: {res['Battery Used']:.2f}
+- Total Grid Import: {res['Grid Import']:.2f}
+- Total Excess Solar: {np.sum(res['Excess Solar Array']):.2f}
+- Final Battery SOC: {res['Final Battery SOC']:.2f}
+- Unmet Load: {res['Unmet Load']:.2f}
+- CO2 Emissions: {res['CO2 Emissions (kg)']:.2f} kg
+- Trees Needed: {res['Trees Needed']:.2f}
 
 Generated on: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}
 """
-        st.download_button(
-            label="Download Summary Report",
-            data=summary_text,
-            file_name="solar_grid_optimization_summary.txt",
-            mime="text/plain"
-        )
-    st.subheader("Detailed Results")
+    st.download_button(
+        label="Download Summary Report",
+        data=summary_text,
+        file_name=f"solar_grid_optimization_summary_{scenario.replace(' ', '_').lower()}.txt",
+        mime="text/plain"
+    )
     st.dataframe(results_df) 
