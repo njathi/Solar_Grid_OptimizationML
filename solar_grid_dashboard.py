@@ -58,8 +58,9 @@ if solarplant_file is not None:
     # Convert W to kW
     solarplant_df['solar_generation_kw'] = solarplant_df['Production Power(W)'] / 1000.0
     solarplant_df['load_kw'] = solarplant_df['Consumption Power(W)'] / 1000.0
-    # Resample to hourly mean
-    hourly_plant = solarplant_df.resample('H').mean()
+    # Resample only numeric columns
+    numeric_cols = ['solar_generation_kw', 'load_kw']
+    hourly_plant = solarplant_df[numeric_cols].resample('H').mean()
     st.write("Solar Plant Data Sample (Hourly):")
     st.dataframe(hourly_plant[['solar_generation_kw', 'load_kw']].head())
 
